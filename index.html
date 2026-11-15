@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#ffffff">
+<title>Subscription Cleaner</title>
+<style>
+:root{--bg:#fff;--fg:#202124;--mut:#5f6368;--line:#dadce0;--chip:#f1f3f4;--red:#ea4335;--blue:#1a73e8;--sheet:#fff}
+@media(prefers-color-scheme:dark){:root{--bg:#1f1f1f;--fg:#e8eaed;--mut:#9aa0a6;--line:#3c4043;--chip:#2d2e30;--sheet:#2d2e30}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.4 -apple-system,"Segoe UI",Roboto,sans-serif;padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom)}
+button{font:inherit;cursor:pointer;border:0;background:none;color:inherit}
+.top{position:sticky;top:0;background:var(--bg);padding:10px 16px 0;z-index:5}
+.pill{display:flex;align-items:center;gap:12px;background:var(--chip);border-radius:28px;height:48px;padding:0 8px 0 16px}
+.pill input{flex:1;border:0;background:none;font:inherit;color:inherit;outline:0;min-width:0}
+.me{width:32px;height:32px;border-radius:50%;background:var(--blue);color:#fff;font-size:13px;font-weight:600}
+.chips{display:flex;gap:8px;padding:12px 0}
+.chip{padding:6px 14px;border-radius:16px;border:1px solid var(--line);font-size:14px}
+.chip.on{background:rgba(234,67,53,.14);border-color:var(--red);color:var(--red)}
+.hdr{padding:4px 16px 8px;font-size:13px;color:var(--mut)}
+.row{display:flex;align-items:center;gap:14px;padding:12px 16px;border-bottom:1px solid var(--line)}
+.row.done{opacity:.55}
+.av{width:42px;height:42px;border-radius:50%;color:#fff;font-weight:600;display:grid;place-items:center;flex:none}
+.info{flex:1;min-width:0}
+.nm{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sub{font-size:13px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.btn{border:1px solid var(--line);color:var(--blue);padding:7px 12px;border-radius:18px;font-size:14px;font-weight:500;flex:none}
+.big{display:block;width:100%;height:50px;border-radius:25px;background:var(--red);color:#fff;font-weight:600}
+.center{min-height:80vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:24px;text-align:center}
+.center p{color:var(--mut);margin:0;max-width:320px}
+.spin{width:32px;height:32px;border:3px solid var(--line);border-top-color:var(--red);border-radius:50%;animation:s 1s linear infinite}
+@keyframes s{to{transform:rotate(360deg)}}
+.scrim{position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:9;display:flex;align-items:flex-end}
+.sheet{background:var(--sheet);width:100%;border-radius:20px 20px 0 0;padding:24px 24px calc(24px + env(safe-area-inset-bottom));display:flex;flex-direction:column;gap:18px}
+.sw{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.sw small{display:block;color:var(--mut)}
+.sw input{width:22px;height:22px;accent-color:var(--red)}
+.toast{position:fixed;left:16px;right:16px;bottom:calc(20px + env(safe-area-inset-bottom));background:#323232;color:#fff;border-radius:8px;padding:12px 16px;display:flex;justify-content:space-between;gap:12px;z-index:20}
+.toast button{color:#8ab4f8;font-weight:600}
+.err{color:var(--red);font-size:14px}
+.link{color:var(--blue);font-size:14px}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script>
+// ====== CONFIG: paste your Google "Web application" OAuth client ID ======
+const CLIENT_ID = "YOUR_CLIENT_ID.apps.googleusercontent.com";
+// =========================================================================
+const SCOPE = "https://www.googleapis.com/auth/gmail.modify";
+const API = "https://gmail.googleapis.com/gmail/v1/users/me";
+const S = {token:null, demo:false, subs:[], q:"", filter:"all", busy:new Set(), sheet:null, loading:false, error:"", toast:null, undo:null};
+const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const color = n => `hsl(${[...n].reduce((a,c)=>a+c.charCodeAt(0)*7,0)%360},55%,45%)`;
+const ago = t => { const d = Math.floor((Date.now()-t)/864e5); return d<1?"today":d===1?"yesterday":d+" days ago"; };
+
+// ---------- Gmail API ----------
+async function api(path, opts = {}) {
+  const r = await fetch(API + path, {...opts, headers:{Authorization:"Bearer "+S.token,"Content-Type":"application/json"}});
+  if (r.status === 401) { S.token = null; S.error = "Session expired. Please sign in again."; render(); throw new Error("401"); }
+  if (!r.ok) throw new Error("Gmail error " + r.status);
+  const t = await r.text(); return t ? JSON.parse(t) : {};
+}
+async function listIds(q, max) {
+  let ids = [], pt = "";
+  do {
+    const d = await api(`/messages?q=${encodeURIComponent(q)}&maxResults=100${pt?"&pageToken="+pt:""}`);
+    ids.push(...(d.messages||[]).map(m=>m.id)); pt = d.nextPageToken;
+  } while (pt && ids.length < max);
+  return ids;
+}
+async function modify(ids, add, remove) {
+  for (let i = 0; i < ids.length; i += 1000)
+    await api("/messages/batchModify", {method:"POST", body:JSON.stringify({ids:ids.slice(i,i+1000), addLabelIds:add, removeLabelIds:remove})});
+}
+
+// ---------- Scan ----------
+async function scan() {
+  S.loading = true; S.error = ""; render();
+  try {
+    if (S.demo) { await sleep(900); S.subs = demoData(); }
+    else {
+      const ids = await listIds("unsubscribe newer_than:6m", 500), total = ids.length, map = {};
+      let n = 0;
+      const worker = async () => { while (ids.length) {
+        const id = ids.pop();
+        try {
+          const m = await api(`/messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=List-Unsubscribe&metadataHeaders=List-Unsubscribe-Post`);
+          const h = {}; m.payload.headers.forEach(x => h[x.name.toLowerCase()] = x.value);
+          const lu = h["list-unsubscribe"]; if (!lu || !h.from) continue;
+          const urls = [...lu.matchAll(/<([^>]+)>/g)].map(x=>x[1]);
+          const http = urls.find(u=>/^https?:/i.test(u)), mail = urls.find(u=>/^mailto:/i.test(u));
+          if (!http && !mail) continue;
+          const mm = h.from.match(/^\s*"?(.*?)"?\s*<(.+?)>\s*$/), name = mm ? (mm[1]||mm[2]) : h.from, email = (mm?mm[2]:h.from).toLowerCase();
+          const t = +m.internalDate, s = map[email];
+          if (s) { s.count++; if (t > s.last) s.last = t; }
+          else map[email] = {name, email, count:1, last:t, method: http ? (h["list-unsubscribe-post"]?"oneclick":"link") : "mailto", url: http || mail, done:false};
+        } catch (e) { if (e.message === "401") return; }
+        const el = $("#prog"); if (el) el.textContent = `Scanned ${++n} of ${total} emails`;
+      }};
+      await Promise.all(Array.from({length:8}, worker));
+      S.subs = Object.values(map).sort((a,b)=>b.count-a.count);
+    }
+  } catch (e) { if (e.message !== "401") S.error = e.message; }
+  S.loading = false; render();
+}
+
+// ---------- Unsubscribe + delete ----------
+async function act(email, del) {
+  const s = S.subs.find(x=>x.email===email); S.sheet = null;
+  // open links synchronously (inside the tap) so the browser doesn't block them
+  if (!S.demo && s.method === "link") window.open(s.url, "_blank", "noopener");
+  if (!S.demo && s.method === "mailto") location.href = s.url;
+  S.busy.add(email); render();
+  try {
+    if (!S.demo && s.method === "oneclick")
+      await fetch(s.url, {method:"POST", mode:"no-cors", headers:{"Content-Type":"application/x-www-form-urlencoded"}, body:"List-Unsubscribe=One-Click"});
+    let ids = [];
+    if (del) {
+      if (S.demo) await sleep(800);
+      else { ids = await listIds(`from:${email}`, 5000); await modify(ids, ["TRASH"], []); }
+    }
+    const was = s.count; s.done = true; if (del) s.count = 0;
+    note(del ? `Unsubscribed · ${S.demo?was:ids.length} emails moved to Trash` : `Unsubscribed from ${s.name}`,
+         del ? async () => { if (!S.demo) await modify(ids, [], ["TRASH"]); s.count = was; s.done = false; note("Restored emails"); } : null);
+  } catch (e) { if (e.message !== "401") note("Something went wrong. Try again."); }
+  S.busy.delete(email); render();
+}
+function note(msg, undo) {
+  S.toast = msg; S.undo = undo || null; render();
+  clearTimeout(note.t); note.t = setTimeout(() => { S.toast = null; render(); }, 6000);
+}
+
+// ---------- Demo data ----------
+function demoData() {
+  const d = n => Date.now() - n*864e5;
+  return [["Medium Daily Digest","noreply@medium.com",128,0,"oneclick"],["Amazon Deals","deals@amazon.com",86,1,"link"],["LinkedIn","news@linkedin.com",64,2,"oneclick"],
+    ["Uber Eats","promo@uber.com",41,4,"link"],["The Hustle","hello@thehustle.co",37,1,"mailto"],["Spotify","no-reply@spotify.com",22,9,"oneclick"],["Nike","news@nike.com",19,12,"link"]]
+    .map(([name,email,count,days,method]) => ({name,email,count,last:d(days),method,url:"#",done:false}));
+}
+
+// ---------- Auth ----------
+function signIn() {
+  if (!window.google) return (S.error = "Google sign-in is still loading. Try again.", render());
+  google.accounts.oauth2.initTokenClient({client_id:CLIENT_ID, scope:SCOPE,
+    callback: r => { if (r.access_token) { S.token = r.access_token; S.demo = false; scan(); } else { S.error = "Sign-in was cancelled or failed."; render(); } }
+  }).requestAccessToken();
+}
+function signOut() { if (S.token && window.google) google.accounts.oauth2.revoke(S.token); Object.assign(S, {token:null, demo:false, subs:[], toast:null}); render(); }
+
+// ---------- UI ----------
+function render() {
+  const app = $("#app"), q = S.q;
+  if (!S.token && !S.demo) {
+    app.innerHTML = `<div class="center">
+      <svg width="64" height="64" viewBox="0 0 24 24" fill="#ea4335"><path d="M20 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2zm0 4-8 5-8-5V6l8 5 8-5z"/></svg>
+      <h1 style="margin:0">Subscription Cleaner</h1>
+      <p>Find newsletters, unsubscribe in one tap, and clear out their emails.</p>
+      <button class="big" style="max-width:320px;background:var(--blue)" data-a="signin">Sign in with Google</button>
+      <button class="link" data-a="demo">Try demo (no sign-in)</button>
+      ${S.error?`<div class="err">${esc(S.error)}</div>`:""}
+      <p style="font-size:12px">Emails are moved to Trash, never permanently deleted.</p></div>`;
+    return;
+  }
+  if (S.loading) { app.innerHTML = `<div class="center"><div class="spin"></div><div>Scanning your inbox…</div><p id="prog"></p></div>`; return; }
+  const vis = S.subs.filter(s => (!q || (s.name+s.email).toLowerCase().includes(q.toLowerCase())) &&
+    (S.filter==="all" || (S.filter==="active") === !s.done));
+  const active = S.subs.filter(s=>!s.done).length;
+  const keep = document.activeElement && document.activeElement.id === "q";
+  app.innerHTML = `
+  <div class="top"><div class="pill">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="#5f6368"><path d="M15.5 14h-.8l-.3-.3A6.5 6.5 0 1 0 14 15.5l.3.3v.8l5 5 1.5-1.5-5-5zm-6 0a4.5 4.5 0 1 1 0-9 4.5 4.5 0 0 1 0 9z"/></svg>
+    <input id="q" placeholder="Search subscriptions" value="${esc(q)}" autocomplete="off">
+    <button class="me" data-a="out" title="Sign out">Me</button></div>
+    <div class="chips">${[["all","All"],["active","Active"],["done","Unsubscribed"]].map(([k,l])=>`<button class="chip ${S.filter===k?"on":""}" data-f="${k}">${l}</button>`).join("")}</div></div>
+  <div class="hdr">${active} active subscriptions ${S.demo?"· demo data":""}</div>
+  ${S.error?`<div class="err" style="padding:0 16px">${esc(S.error)}</div>`:""}
+  ${vis.map(s=>`<div class="row ${s.done?"done":""}">
+    <div class="av" style="background:${color(s.name)}">${esc(s.name[0].toUpperCase())}</div>
+    <div class="info"><div class="nm">${esc(s.name)}</div><div class="sub">${esc(s.email)}</div>
+    <div class="sub">${s.done?"Unsubscribed":`${s.count} emails · ${ago(s.last)}`}</div></div>
+    ${S.busy.has(s.email)?`<div class="spin" style="width:22px;height:22px"></div>`: s.done?`<span style="color:#188038;font-size:22px">✓</span>`:`<button class="btn" data-u="${esc(s.email)}">Unsubscribe</button>`}</div>`).join("")}
+  ${!vis.length?`<div class="center"><p>No subscriptions found.</p></div>`:""}
+  ${S.sheet?sheet():""}
+  ${S.toast?`<div class="toast"><span>${esc(S.toast)}</span>${S.undo?`<button data-a="undo">Undo</button>`:""}</div>`:""}`;
+  if (keep) { const i = $("#q"); i.focus(); i.setSelectionRange(q.length, q.length); }
+}
+function sheet() {
+  const s = S.subs.find(x=>x.email===S.sheet);
+  return `<div class="scrim" data-a="close"><div class="sheet" onclick="event.stopPropagation()">
+    <div style="display:flex;gap:14px;align-items:center"><div class="av" style="background:${color(s.name)}">${esc(s.name[0].toUpperCase())}</div>
+    <div><b>Unsubscribe from ${esc(s.name)}?</b><div class="sub">${esc(s.email)}</div></div></div>
+    <label class="sw"><span>Also delete all emails from this sender<small>Moved to Trash. Recoverable for 30 days.</small></span><input type="checkbox" id="del" checked></label>
+    <button class="big" data-a="go">Unsubscribe</button><button data-a="close">Cancel</button></div></div>`;
+}
+document.addEventListener("click", e => {
+  const t = e.target.closest("[data-a],[data-f],[data-u]"); if (!t) return;
+  const {a, f, u} = t.dataset;
+  if (f) { S.filter = f; render(); }
+  else if (u) { S.sheet = u; render(); }
+  else if (a === "signin") signIn();
+  else if (a === "demo") { S.demo = true; scan(); }
+  else if (a === "out") { if (confirm("Sign out?")) signOut(); }
+  else if (a === "close") { S.sheet = null; render(); }
+  else if (a === "go") act(S.sheet, $("#del").checked);
+  else if (a === "undo") { const u = S.undo; S.toast = null; render(); u && u().catch(()=>note("Couldn't undo.")).then(render); }
+});
+document.addEventListener("input", e => { if (e.target.id === "q") { S.q = e.target.value; render(); } });
+render();
+</script>
+</body>
+</html>
